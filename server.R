@@ -6,7 +6,21 @@ library(shiny)
 library(sf) 
 
 #### Functions
-ChoosePt <- function(startPt, seg, segFraction) {
+ClearAll <- function() {
+  # Clears map and RV objects
+  #
+  # Args: None
+  #
+  # Returns: Clears map and RV objects
+  #
+  proxy <- leafletProxy("map") %>%
+    clearMarkers() %>%
+    clearShapes()
+  #locationRV$Segment <- NULL
+  #locationRV$Intersection <- NULL
+}
+
+CalcSegFraction <- function(startPt, seg, distFt) {
   # Ensure interpolation along line returns correct point
   # using PostGIS function ST_LineLocatePoint for verification
   #
@@ -16,14 +30,45 @@ ChoosePt <- function(startPt, seg, segFraction) {
   #   segFraction: Fractional value of the segment where the point is located
   #
   # Returns:
-  #   The sf point that matches the distance specified in DistToPt
+  #   Fractional value along the line for generating the point
   #
-  Pt1 <- st_line_sample(x = seg, n = 1, sample = segFraction) %>% st_cast("POINT")
-  Pt2 <- st_line_sample(x = seg, n = 1, sample = (1 - segFraction)) %>% st_cast("POINT")
+  #print(seg)
+  segDistFt <- st_length(seg)
+  segFraction <- distFt/segDistFt
+  units(segFraction) <- NULL
+  print(segFraction)
+  if(CheckLineStart(startPt, seg) == TRUE) {
+    return(segFraction) 
+  } else if (CheckLineStart(startPt, seg) == FALSE) {
+    return(1 - segFraction)
+  }
+}
+
+CheckLineStart <- function(startPt, seg) {
+  # Ensure interpolation along line returns correct point
+  # using PostGIS function ST_LineLocatePoint for verification
+  #
+  # Args:
+  #   startPt: intersection point used to establish origin for distance
+  #   seg: A polyline segment to interpolate the distance along
+  #
+  # Returns:
+  #   True/False indicating whether the intersection point
+  #   at the start of the line or not
+  #
+  Pt1 <- st_line_sample(x = seg, n = 1, sample = 0) %>% st_cast("POINT")
+  Pt2 <- st_line_sample(x = seg, n = 1, sample = 1) %>% st_cast("POINT")
+  #print(Pt1)
+  #print(Pt2)
+  if(st_distance(startPt, Pt1) < st_distance(startPt, Pt2)){
+    return(TRUE)
+  } else {
+    return(FALSE)
+  }
   
 }
 
-DistToPt <- function(startPt, seg, distFt) {
+GenerateLinePoint <- function(startPt, seg, distFt) {
   # Generate a point along a line
   #
   # Args:
@@ -39,8 +84,12 @@ DistToPt <- function(startPt, seg, distFt) {
     st_cast("LINESTRING") %>%
     st_set_crs(4326) %>%
     st_transform(2229)
-  segDistFt <- st_length(seg)
-  segFraction <- distFt/segDistFt
+  startPt <- startPt %>%
+    st_set_crs(4326) %>%
+    st_transform(2229)
+  #segDistFt <- st_length(seg)
+  #segFraction <- distFt/segDistFt
+  segFraction <- CalcSegFraction(startPt, seg, distFt)
   infrastructurePt <- st_line_sample(x = seg, n = 1, sample = segFraction) %>%
     st_cast("POINT") %>%
     st_transform(4326)
@@ -64,7 +113,7 @@ SelectSegment <- function(segID) {
     # Add selected line information to RV
     locationRV$Segment <- polylineSelected
     # Add selected line on top as another color
-    proxy <- leafletProxy("infrastructureManagerMap") %>%
+    proxy <- leafletProxy("map") %>%
       # Add selected line shape to map
       addPolylines(
         data = polylineSelected,
@@ -128,9 +177,6 @@ server <- function(input, output, session) {
   })
   
   ### Reactive Objects
-  # RV for location objects
-  rv_location <- reactiveValues(Intersection=list(),
-                                Segment=list())
   # RV storing UI message variable
   rv_msg <- reactiveValues()
   
@@ -163,8 +209,8 @@ server <- function(input, output, session) {
   
   # Reactive expression to grab the council district based on the point
   cdR <- reactive({
-    if(!is.null(rv_location$Intersection)){
-      cdR <- sf::st_join(rv_location$Intersection, councilDistricts)
+    if(!is.null(locationRV$Intersection)){
+      cdR <- sf::st_join(locationRV$Intersection, councilDistricts)
       return(cdR$DISTRICT)
     } else {
       return(NULL)
@@ -173,8 +219,8 @@ server <- function(input, output, session) {
   
   # Reactive expression to grab the DOT district based on the point
   dotR <- reactive({
-    if(!is.null(rv_location$Intersection)){
-      dotR <- sf::st_join(rv_location$Intersection, dotDistricts)
+    if(!is.null(locationRV$Intersection)){
+      dotR <- sf::st_join(locationRV$Intersection, dotDistricts)
       return(dotR$DOT_DIST)
     } else {
       return(NULL)
@@ -213,15 +259,16 @@ server <- function(input, output, session) {
     if(!is.null(input$int) && input$int != "" && length(input$int) > 0){
       # Get intersection reactive var, clear markers, clear RV
       intersectionR <- intersectionR()
-      rv_location$Segment <- NULL
+      locationRV$Segment <- NULL
       proxy <- leafletProxy("map") %>%
         clearMarkers() %>%
         clearShapes()
+      #ClearAll()
       
       # If there is one marker in the query, it is blue
       if(nrow(intersectionR) == 1 && length(intersectionR) > 0) {
         # Add intersection to RV object
-        rv_location$Intersection <- intersectionR
+        locationRV$Intersection <- intersectionR
         # Add intersection marker to map
         proxy %>% addAwesomeMarkers(
           data = intersectionR,
@@ -278,7 +325,7 @@ server <- function(input, output, session) {
       # Filter intersections based on the click
       intS <- intersectionR() %>%
         filter(rownames(.) == click_id)
-      rv_location$Intersection <- intS
+      locationRV$Intersection <- intS
       # HERE I NEED TO UPDATE locationRV$point
       # HERE I NEED TO ADD SELECTED LINE
       proxy <- leafletProxy("map") %>%
@@ -289,7 +336,7 @@ server <- function(input, output, session) {
           icon = CreateIcon('darkblue')
         )
       
-      rv_msg$msg <- c(paste0("Coordinates: ", toString(rv_location$Intersection$geometry)),
+      rv_msg$msg <- c(paste0("Coordinates: ", toString(locationRV$Intersection$geometry)),
                       paste0("Council District: ",toString(cdR())),
                       paste0("DOT District: ", toString(dotR())))
     }
@@ -303,7 +350,7 @@ server <- function(input, output, session) {
       # Filter polylines based on the click
       polyline_s <- xstreetR() %>%
         filter(rownames(.) == click_id )
-      rv_location$Segment <- polyline_s
+      locationRV$Segment <- polyline_s
       # Add selected line on top as another color
       proxy <- leafletProxy("map") %>%
         # Add selected line shape to map
@@ -320,12 +367,12 @@ server <- function(input, output, session) {
   
   # Observer to add point along the line
   observe({
-    #if(!any(sapply(list(locationRV$Intersection, locationRV$Segment, input$distance), is.null))){
-    if(length(locationRV$Intersection) > 0){
+    if(!any(sapply(list(locationRV$Intersection, locationRV$Segment, input$distance), function(x) length(x) < 1))){
+    #if(length(locationRV$Intersection) > 0){
       print(locationRV$Intersection)
       print(locationRV$Segment)
       print(input$distance)
-      infrastructurePt <- DistToPt(locationRV$Intersection, locationRV$Segment, input$distance) 
+      infrastructurePt <- GenerateLinePoint(locationRV$Intersection, locationRV$Segment, input$distance) 
       # Update Map
       leafletProxy("map") %>%
         removeMarker(layerId = "infrastructurePt") %>%
